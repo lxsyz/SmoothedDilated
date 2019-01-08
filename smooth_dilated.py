@@ -1,52 +1,75 @@
 from keras import backend as K
 from keras.layers import Layer
+import tensorflow as tf
 
 class SmoothedDilatedLayer1D(Layer):
     """
     1D-convolution for sequence data
     """
 
-    def __init__(self, kernel_size, output_dim, dilation_factor, biased=False, **kwargs):
+    def __init__(self, kernel_size, output_dim, dilation_factor, algorithm="GI", biased=False, **kwargs):
         self.output_dim = output_dim
         self.kernel_size = kernel_size
         self.dilation_factor = dilation_factor
         self.biased = biased
-        super(SmoothedDilatedLayer, self).__init__(**kwargs)
+        self.algorithm = algorithm
+        
+        self.fix_w_size = self.dilation_factor * 2 - 1
+        super(SmoothedDilatedLayer1D, self).__init__(**kwargs)
 
     def build(self, input_shape):
         # Create a trainable weight variable for this layer.
         c = input_shape[-1]
-        
-        self.w = self.add_weight(shape=(self.kernel_size, c, self.output_dim), initializer="uniform", name='w')
-        self.fix_w = self.add_weight(shape=(self.dilation_factor, self.dilation_factor), initializer="ones", name='fix_w')
+        if self.algorithm == "GI":
+            self.w = self.add_weight(shape=(self.kernel_size, c, self.output_dim), initializer="uniform", name='w')
+            self.fix_w = self.add_weight(shape=(self.dilation_factor, self.dilation_factor), initializer="ones", name='fix_w')
+        elif self.algorithm == "SSC":
+            
+            self.fix_w = self.add_weight(shape=(self.fix_w_size, self.fix_w_size, 1, 1), initializer="zeros", name='fix_w')
+            self.w = self.add_weight(shape=(self.kernel_size, c, self.output_dim), initializer="uniform", name='w')
         if self.biased:
             self.b = self.add_weight(shape=(self.output_dim, ), initializer="uniform", name='biases')
         self.built = True
 
-    def call(self, x):   
-        L = K.shape(x)[1]
-        pad_right = (self.dilation_factor - L % self.dilation_factor) if L % self.dilation_factor != 0 else 0
-
-        pad = [[0, pad_right]]
-        # decomposition to smaller-sized feature maps
-        #[N,L,C] -> [N*d, L/d, C]
-        o = K.tf.space_to_batch_nd(x, paddings=pad, block_shape=[self.dilation_factor])
+    def call(self, x):
+        if self.algorithm == "GI":
+            L = K.shape(x)[1]
+            pad_right = (self.dilation_factor - L % self.dilation_factor) if L % self.dilation_factor != 0 else 0
+    
+            pad = [[0, pad_right]]
+            # decomposition to smaller-sized feature maps
+            #[N,L,C] -> [N*d, L/d, C]
+            o = K.tf.space_to_batch_nd(x, paddings=pad, block_shape=[self.dilation_factor])
+                
+            s = 1
+            o = K.conv1d(o, self.w, s, padding='same')
+    		
+            l = K.tf.split(o, self.dilation_factor, axis=0)
+            res = []
+            for i in range(0, self.dilation_factor):
+                res.append(self.fix_w[0, i] * l[i])
+                for j in range(1, self.dilation_factor):
+                    res[i] += self.fix_w[j, i] * l[j]	        
+            o = K.tf.concat(res, axis=0)
+            if self.biased:
+                o = K.bias_add(o, self.b)
+            o = K.tf.batch_to_space_nd(o, crops=pad, block_shape=[self.dilation_factor])
             
-        s = 1
-        o = K.conv1d(o, self.w, s, padding='same')
-		
-        l = K.tf.split(o, self.dilation_factor, axis=0)
-        res = []
-        for i in range(0, self.dilation_factor):
-            res.append(self.fix_w[0, i] * l[i])
-            for j in range(1, self.dilation_factor):
-                res[i] += self.fix_w[j, i] * l[j]	        
-        o = K.tf.concat(res, axis=0)
-        if biased:
-            o = bias_add(o, b)
-        o = K.tf.batch_to_space_nd(o, crops=pad, block_shape=[self.dilation_factor])
-        
-        return o
+            return o
+        elif self.algorithm == "SSC":
+            mask = np.zeros([self.fix_w_size, self.fix_w_size, 1, 1], dtype=np.float32)
+            mask[self.dilation_factor - 1, self.dilation_factor - 1, 0, 0] = 1
+            
+            self.fix_w = K.tf.add(self.fix_w, K.constant(mask, dtype=tf.float32))
+            o = K.expand_dims(x, -1)
+            # maybe we can also use K.separable_conv1d
+            o = K.conv2d(o, self.fix_w, strides=[1, 1], padding='same')
+            o = K.squeeze(o, -1)
+            o = K.conv1d(o, self.w, dilation_rate=self.dilation_factor, padding='same')
+            
+            if self.biased:
+                o = K.bias_add(o, self.b)
+            return o
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], input_shape[1], self.output_dim)
@@ -73,7 +96,7 @@ if __name__ == "__main__":
     # Dense(64) 是一个具有 64 个隐藏神经元的全连接层。
     # 在第一层必须指定所期望的输入数据尺寸：
     # 在这里，是一个 20 维的向量。
-    model.add(SmoothedDilatedLayer(kernel_size=3, output_dim=64, dilation_factor=2, name="smoothed_dilated_l1"))
+    model.add(SmoothedDilatedLayer1D(kernel_size=3, output_dim=64, dilation_factor=2, algorithm="SSC", name="smoothed_dilated_l1"))
     model.add(Reshape((-1,)))
     model.add(Dense(64, activation='relu', input_shape=(64, )))
     model.add(Dense(10, activation='softmax', input_dim=64))
