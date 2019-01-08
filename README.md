@@ -1,6 +1,7 @@
 # SmoothedDilated
 Smoothed Dilated Convolutions in Keras(Not official, maybe improper, only for reference)
-<b>SmoothedDilatedLayer1D<b> is used to deal with the input like [batch, length, filters]
+
+SmoothedDilatedLayer1D is used to deal with the input like [batch, length, filters]
 
 # Reference
 [https://github.com/divelab/dilated](https://github.com/divelab/dilated)
