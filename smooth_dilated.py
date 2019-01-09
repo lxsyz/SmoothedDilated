@@ -2,6 +2,7 @@ from keras import backend as K
 from keras.layers import Layer
 import tensorflow as tf
 
+
 class SmoothedDilatedLayer1D(Layer):
     """
     1D-convolution for sequence data
